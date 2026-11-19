@@ -86,7 +86,7 @@ vuka config serve --dir /etc/acme-config
 ```
 
 - For a single machine, for development and for tests.
-- The server watches it and serves a change when a file is saved.
+- A saved file is served at once (it is read on every request), and watchers of the snapshot are told within a few seconds (§7).
 - A snapshot's version is a hash of the files that make it up.
 - History is whatever the directory has; pointing the server at a git
   working copy without `--git` serves its files as they are on disk.
@@ -134,7 +134,7 @@ and as `config.Server(...)`, a handler any Vuka app can mount.
 |---|---|
 | `GET /{app}/{profile}[/{label}]` | the snapshot as JSON: each source (file and version) with its values, the merged values, the version |
 | `GET /{app}/{profile}[/{label}].env` | the merged values as an env file, for scripts and for apps not built with Vuka |
-| `GET /{app}/{profile}/watch` | a stream of the snapshot's new versions (§7) |
+| `GET /{app}/{profile}/watch[?label=…]` | a stream of the snapshot's version, now and on every change (§7); the label is a query parameter because `watch` can't be a label |
 | `GET /_keys/{app}` | the public key `{cipher}` values for the app are encrypted to (§8), signed with the server's signing key; public, no token |
 | `GET /_keys` | the same for the server's decryption key, when `--decrypt` is on |
 
@@ -210,7 +210,10 @@ so an operator can pin a value on one machine.
 
 Each instance follows its snapshot's `/watch` stream; there is no broker in
 between. On a new version it fetches the snapshot, checks the signature,
-and sets the changed values in the process environment.
+decrypts the `{cipher}` values (§8), and applies the changed values with
+`web.ApplyEnv`: below the real environment and above the env files, the same
+rule as at start. A key the source no longer provides goes back to the value
+an env file gave it, or is unset.
 
 - **Code that reads a value when it uses it** (`web.Env` in a handler) sees
   the new value at its next call, with nothing else to do.
@@ -225,11 +228,84 @@ and sets the changed values in the process environment.
   starts. A change to one of those is logged as needing a restart, and the
   snapshot's report says so. An app can opt in to restarting itself: it
   drains and exits so its supervisor starts it with the new values, one
-  instance at a time.
+  instance at a time. *Pending: this needs the compiler, and is not part of
+  the first `/watch` release; until then every key is applied, and an app
+  that reads one only at start keeps its start-up value.*
 
-The `/watch` stream is a long-lived HTTP response; it reconnects with
-backoff, and the client also polls the version every 30 s, so a lost
-stream costs at most that.
+### 7.1 The stream
+
+`GET /{app}/{profile}/watch` (no profile: `-`; a label: `?label=v42`) takes
+the token of the snapshot endpoint, reads the same files for the same app
+and answers the same 404 for an unknown app, label or another app's token,
+and 401 without a valid token. The response is a long-lived `200
+text/event-stream` (server-sent events, plain HTTP):
+
+```text
+event: version
+data: 3f2a1c9e…
+
+: keepalive
+
+event: version
+data: 8b0d7e44…
+```
+
+- The current version is sent on connect, and again whenever it changes.
+  Only the version travels, never a value: the client fetches the signed
+  snapshot, so the stream needs no signature of its own and a forged event
+  can at most cause a fetch.
+- A comment line (`: keepalive`) every 25 s keeps proxies from cutting an
+  idle stream. A client that hears nothing for 90 s treats the stream as
+  lost.
+- A version is the snapshot's: the commit for git, a hash of the files
+  that make the snapshot for a directory.
+- Only `GET` is served (405 otherwise). Shutdown ends every stream cleanly
+  (`config.Handler.Close`, which `vuka-config serve` registers with
+  `http.Server.RegisterOnShutdown`), and the client reconnects.
+
+**One computation per snapshot.** Watchers of the same app, profile and label
+share a single goroutine, started with the first and stopped with the last,
+that reads the snapshot's version and hands a new one to each of them: a
+thousand instances cost one read per interval, not a thousand. It reads every
+`WatchInterval` (3 s): for a directory that is the hash of the (at most four)
+files, which needs no file-system notifications; for git, the label's commit
+in the mirror, so a commit shows up as soon as the mirror fetches it. A
+`POST /_hooks/git` that refreshed the mirror makes every watched snapshot be
+read at once, so a push reaches the instances in about the time of the fetch.
+A read that fails (the source is down, a file is invalid) is logged once, and
+the last version stands until a read works.
+
+**Caps.** A token holds at most 16 streams and the server 2000
+(`WatchPerApp`, `WatchTotal`; negative for no cap). Beyond the first it
+answers `429` with `Retry-After`, beyond the second `503` with `Retry-After`.
+Requests that fail authentication or name another app's snapshot are refused
+before the caps are looked at.
+
+### 7.2 What the client does
+
+- **Following.** After the start-up fetch the client holds the stream open,
+  reconnecting with jittered, doubling backoff (1 s to 30 s). It also checks
+  the version every 30 s (a `HEAD` of the snapshot), so a lost stream, or a
+  server or proxy that has no `/watch`, costs at most that.
+- **Fail-safe at runtime.** A snapshot that fails the signature check, names
+  another app, or has a `{cipher}` value the client can't decrypt is not
+  applied, not even in part: the app keeps the values it has, an error is
+  logged naming the server and, for a secret, the variables (never a value),
+  and the client keeps following; a later good version is applied. Each
+  refused version is reported once. This is the reverse of the start-up
+  rule of §8, which fails closed: at start there are no values yet and
+  running without a secret is worse than not running; later the app already
+  runs with a complete configuration, and a half-applied or lost one is
+  worse than the one it has.
+- **Logging.** `config: applied 3 changes (version 3f2a1c9e0b1d): KEY1,
+  KEY2, KEY3`: keys only.
+- **A start with no snapshot** (no server, no cache) goes on trying in the
+  background, with the same backoff, and applies the first snapshot it gets.
+  A start from the cache applies a newer version when the server answers.
+- **Each applied snapshot replaces the sealed cache** (§6.3).
+- **Opt-out.** `VUKA_CONFIG_WATCH=0` fetches at start only.
+- **Applying** is one call to `web.ApplyEnv` from one goroutine, so
+  `OnEnvChange` callbacks run there, one after another.
 
 ## 8. Secrets
 
@@ -324,8 +400,8 @@ stream costs at most that.
    and shared values.
 2. **Secrets.** `{cipher}` values decrypted by the client, per-app keys,
    `vuka config encrypt`, and the server-side option.
-3. **Changes while running.** `/watch`, `web.OnEnvChange`, `web.Hot`, the
-   compiler's start-only keys and the opt-in restart.
+3. **Changes while running.** `/watch`, `web.OnEnvChange`, `web.Hot`
+   (done); the compiler's start-only keys and the opt-in restart (pending).
 4. **Checks and reports.** `vuka config check`, the toolbar panel and
    `/debug/env`, `vuka config pull`.
 

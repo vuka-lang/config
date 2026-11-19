@@ -64,11 +64,52 @@ import _ "github.com/vuka-lang/config/v2/client"
 | `VUKA_CONFIG_LABEL` | a branch, tag or commit; default the repository's default branch |
 | `VUKA_CONFIG_CACHE` | the file for the sealed last snapshot; default the user cache directory |
 | `VUKA_CONFIG_FAIL_FAST` | `1`: exit unless a fresh snapshot was fetched |
+| `VUKA_CONFIG_WATCH` | `0`: fetch at start only, don't follow changes |
 
 The real environment wins over the server, the server over env files, env
 files over the defaults in code. If the server can't be reached, the client
 uses the last snapshot it received, or starts without one and logs an error
 naming the server.
+
+## Changes while running
+
+After start the client follows the server: it holds `GET
+/{app}/{profile}/watch[?label=…]` open (a stream of the snapshot's version,
+sent on connect and on every change; no values travel on it) and also checks
+the version every 30 s, so a lost stream costs at most that. On a new version
+it fetches the signed snapshot, checks it, decrypts its secrets and applies it;
+a change in the repository or the directory reaches the instances in seconds.
+
+```go
+// read where you use it: always current
+if web.Env[bool]("MAINTENANCE") { … }
+
+// a handle that stays current
+limit := web.Hot[int]("RATE_LIMIT", 100)
+… limit.Get() …
+
+// a value you keep: be told when it changes
+web.OnEnvChange("POOL_SIZE", func(old, new string) { pool.Resize(new) })
+```
+
+A snapshot that doesn't verify, or has a secret the app can't decrypt, is not
+applied, not even in part: the app keeps the values it has, an error naming the
+server and the variable (never a value) is logged, and the client keeps
+following. Applied changes are logged by key: `config: applied 3 changes
+(version 3f2a1c9e0b1d): KEY1, KEY2, KEY3`. A key the source stops providing
+goes back to its env-file value; the real environment still wins. An app that
+started with no server and no cache keeps trying and applies the first
+snapshot it gets. `VUKA_CONFIG_WATCH=0` turns following off.
+
+The server shares one computation per app, profile and label between all its
+watchers (a directory's files are hashed, a git label's commit read, every
+`WatchInterval`, 3 s; a git push hook makes it immediate) and caps the streams
+at 16 per token and 2000 in all, answering `429` or `503` with `Retry-After`.
+In Go, `config.Server` returns a `*config.Handler`; `http.Server.RegisterOnShutdown(h.Close)`
+ends the streams when the server shuts down (`vuka-config serve` does).
+Values that cannot change while an app runs (a listen address) will be
+reported as needing a restart once the compiler records them (RFC §7); until
+then every value is applied.
 
 ## Secrets
 
