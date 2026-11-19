@@ -40,7 +40,10 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-const token = "orders-token-s3cr3t"
+const (
+	token        = "orders-token-s3cr3t"
+	billingToken = "billing-token-s3cr3t"
+)
 
 type server struct {
 	*httptest.Server
@@ -51,6 +54,11 @@ type server struct {
 
 func newServer(t *testing.T, files map[string]string, wrap func(http.Handler) http.Handler) *server {
 	t.Helper()
+	return newServerCfg(t, files, wrap, nil)
+}
+
+func newServerCfg(t *testing.T, files map[string]string, wrap func(http.Handler) http.Handler, cfg func(*config.ServerConfig)) *server {
+	t.Helper()
 	dir := t.TempDir()
 	for name, body := range files {
 		os.MkdirAll(filepath.Dir(filepath.Join(dir, name)), 0o755)
@@ -58,10 +66,14 @@ func newServer(t *testing.T, files map[string]string, wrap func(http.Handler) ht
 	}
 	src, _ := dirsrc.New(dir)
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	h, err := config.Server(config.ServerConfig{
+	c := config.ServerConfig{
 		Source: src, Key: priv, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Tokens: map[string]string{"orders": config.HashToken(token)},
-	})
+		Tokens: map[string]string{"orders": config.HashToken(token), "billing": config.HashToken(billingToken)},
+	}
+	if cfg != nil {
+		cfg(&c)
+	}
+	h, err := config.Server(c)
 	if err != nil {
 		t.Fatal(err)
 	}
