@@ -27,8 +27,7 @@ go run github.com/vuka-lang/config/v2/cmd/vuka-config token orders
 `keygen` prints the public key (`VUKA_CONFIG_KEY`); `token` prints the app's
 token (`VUKA_CONFIG_TOKEN`) and the hashed entry for the server's tokens file,
 one `app=hash` per line. Serve a repository or a directory laid out as in
-§4.3 (`application.env`, `application-production.env`, `orders.env`,
-`orders-production.env`):
+§4.3 (`.env`, `.env.production`, `orders/.env`, `orders/.env.production`):
 
 ```sh
 vuka-config serve --git https://example.com/acme/config.git --tokens tokens --key signing.key
@@ -42,9 +41,11 @@ once; the repository is also fetched every `--poll`, 30 s),
 `VUKA_CONFIG_TOKENS` and `VUKA_CONFIG_SIGNING_KEY` in place of the files.
 `GET /{app}/{profile}[/{label}]` returns the signed snapshot, with `.env`
 after the last segment the merged values as an env file. App and profile
-names are letters, digits and underscores (a profile may also hold `-` and
-`.`); an app name has no hyphen, so `orders-production.env` is never read
-for another app.
+names are letters, digits, `-` and `_` (a profile may also hold `.`; neither
+starts with `-` or `.`). An app has a folder, so a hyphen in its name is never
+ambiguous, and its files are named as a project's own env files. With no
+profile the segment is `-` (only `.env` and `orders/.env` apply). A token
+reads its own folder and the root `.env` and `.env.<profile>`, nothing else.
 
 An app imports the client for its effect, and sets the variables:
 
@@ -57,7 +58,7 @@ import _ "github.com/vuka-lang/config/v2/client"
 | `VUKA_CONFIG_URI` | the server's URL; unset, the client does nothing |
 | `VUKA_CONFIG_TOKEN` | the app's token |
 | `VUKA_CONFIG_KEY` | the server's public key |
-| `VUKA_APP`, `VUKA_ENV` | the app and its profile (`default` without `VUKA_ENV`) |
+| `VUKA_APP`, `VUKA_ENV` | the app and its profile (none without `VUKA_ENV`) |
 | `VUKA_CONFIG_LABEL` | a branch, tag or commit; default the repository's default branch |
 | `VUKA_CONFIG_CACHE` | the file for the sealed last snapshot; default the user cache directory |
 | `VUKA_CONFIG_FAIL_FAST` | `1`: exit unless a fresh snapshot was fetched |

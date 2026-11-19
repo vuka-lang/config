@@ -53,6 +53,7 @@ func newServer(t *testing.T, files map[string]string, wrap func(http.Handler) ht
 	t.Helper()
 	dir := t.TempDir()
 	for name, body := range files {
+		os.MkdirAll(filepath.Dir(filepath.Join(dir, name)), 0o755)
 		os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644)
 	}
 	src, _ := dirsrc.New(dir)
@@ -78,8 +79,8 @@ func newServer(t *testing.T, files map[string]string, wrap func(http.Handler) ht
 }
 
 var served = map[string]string{
-	"application.env":       "A=server-shared\nSHARED=1\nVUKA_ENV=evil\nVUKA_DEV=1\n",
-	"orders-production.env": "B=server-orders\nREAL=server\nD=server-d\nTOKEN_ECHO=$ORDERS_NOTHING\nPASSWORD=hunter2-from-server\n",
+	".env":                   "A=server-shared\nSHARED=1\nVUKA_ENV=evil\nVUKA_DEV=1\n",
+	"orders/.env.production": "B=server-orders\nREAL=server\nD=server-d\nTOKEN_ECHO=$ORDERS_NOTHING\nPASSWORD=hunter2-from-server\n",
 }
 
 type run struct {
@@ -232,7 +233,7 @@ func TestCacheRejected(t *testing.T) {
 
 	flipped := append([]byte(nil), good...)
 	flipped[len(flipped)/2] ^= 1
-	other := newServer(t, map[string]string{"orders-production.env": "A=forged\n"}, nil)
+	other := newServer(t, map[string]string{"orders/.env.production": "A=forged\n"}, nil)
 	otherRun := newRun(t, other)
 	otherRun.cache = r.cache
 	otherRun.env["VUKA_CONFIG_CACHE"] = r.cache
@@ -370,12 +371,12 @@ func TestSnapshotForAnotherLabelRefused(t *testing.T) {
 	}
 }
 
-func TestDefaultProfile(t *testing.T) {
+func TestNoProfile(t *testing.T) {
 	t.Parallel()
-	s := newServer(t, map[string]string{"orders-default.env": "A=from-default-profile\n"}, nil)
+	s := newServer(t, map[string]string{"orders/.env": "A=from-app-env\nSHARED=app\n", ".env": "SHARED=root\nONLY=root\n", ".env.default": "A=no\n", "orders/.env.production": "A=no\n"}, nil)
 	r := newRun(t, s)
 	r.env["VUKA_ENV"] = "-"
-	if res := r.exec(t); res.env["A"] != "from-default-profile" {
-		t.Errorf("%v %s", res.env, res.stderr)
-	}
+	r.env["CLIENT_PROBE"] = "A,SHARED,ONLY"
+	res := r.exec(t)
+	want(t, res, map[string]string{"A": "from-app-env", "SHARED": "app", "ONLY": "root"})
 }

@@ -200,7 +200,7 @@ func keygen(args []string) error {
 
 func token(args []string) error {
 	if len(args) != 1 || !config.ValidApp(args[0]) {
-		return errors.New("token takes one app name (letters, digits and underscores)")
+		return errors.New("token takes one app name (letters, digits, hyphens and underscores)")
 	}
 	tok := config.NewToken()
 	fmt.Printf("token (VUKA_CONFIG_TOKEN):         %s\n", tok)

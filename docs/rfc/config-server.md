@@ -96,18 +96,32 @@ vuka config serve --dir /etc/acme-config
 Both sources have the same layout:
 
 ```text
-application.env                 every app, every profile
-application-production.env      every app, in production
-orders.env                      the orders app, every profile
-orders-production.env           orders, in production
+.env                    every app, every profile
+.env.production         every app, in production
+orders/.env             the orders app, every profile
+orders/.env.production  orders, in production
 ```
 
 For app `orders` in profile `production` the values merge in this order,
-the later winning: `application.env`, `application-production.env`,
-`orders.env`, `orders-production.env`.
+the later winning: `.env`, `.env.production`, `orders/.env`,
+`orders/.env.production`. With no profile (`VUKA_ENV` unset) only `.env` and
+`orders/.env` apply.
+
+Inside an app's folder the files have the names a Vuka project's own env
+files have (`.env`, `.env.<profile>`), so a project's files copy into the
+repository unchanged. An app name is a single directory name of letters,
+digits, `-` and `_`, not starting with `-` or `.`; a profile holds letters,
+digits, `-`, `_` and `.`, not starting with `-` or `.`. The server reads
+only these four paths, never follows a symbolic link, and doesn't treat
+`.git` or any other dot-directory as an app.
 
 Files are env files in the syntax Vuka already reads (`KEY=value`, quotes,
 comments), so a file moves between a project and the repository unchanged.
+
+Each app has a folder, rather than a flat name like `orders-production.env`,
+because a flat `app-profile.env` is ambiguous when names contain hyphens:
+`a-b-c.env` would be app `a` in profile `b-c` or app `a-b` in profile `c`,
+and one app's token could read the other's file.
 
 ## 5. The server
 
@@ -122,10 +136,12 @@ and as `config.Server(...)`, a handler any Vuka app can mount.
 | `GET /{app}/{profile}[/{label}].env` | the merged values as an env file, for scripts and for apps not built with Vuka |
 | `GET /{app}/{profile}/watch` | a stream of the snapshot's new versions (§7) |
 
+With no profile, the profile segment is `-`, which no profile can be.
+
 ### 5.2 Access
 
-- Each app has its own token. A token reads its app's files and the shared
-  `application*` files, nothing else.
+- Each app has its own token. A token reads its app's folder and the shared
+  root `.env` and `.env.<profile>` (§4.3), nothing else: never another app's folder.
 - Tokens are listed in the server's own configuration (a file or the
   environment), hashed; the server never logs one.
 - The server can require client certificates instead of, or as well as,
@@ -237,7 +253,7 @@ stream costs at most that.
 - **Where each value came from**: a panel in the development toolbar and an
   endpoint an app can mount (`/debug/env`, behind the app's own gate) show
   each key's value (masked if secret) and its source: the real environment,
-  `orders-production.env@3f2a1c`, `.env`, or the default.
+  `orders/.env.production@3f2a1c`, `.env`, or the default.
 - **`vuka config pull orders production`** writes `.env.local` from the
   server, so a developer can run with an environment's values. Secrets stay
   out unless `--secrets` is given and the token may read them.

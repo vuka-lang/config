@@ -119,6 +119,11 @@ func (s *Source) Read(ctx context.Context, label string, names []string) (config
 		return t, config.ErrNotFound
 	}
 	t.Version = commit
+	for _, name := range names {
+		if !config.ValidFile(name) {
+			return t, fmt.Errorf("gitsrc: bad file name %q", name)
+		}
+	}
 	var missing []string
 	s.mu.Lock()
 	for _, name := range names {

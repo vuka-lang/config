@@ -31,6 +31,7 @@ func (r repo) git(args ...string) string {
 func (r repo) commit(msg string, files map[string]string) string {
 	r.t.Helper()
 	for name, body := range files {
+		os.MkdirAll(filepath.Dir(filepath.Join(r.dir, name)), 0o755)
 		if err := os.WriteFile(filepath.Join(r.dir, name), []byte(body), 0o644); err != nil {
 			r.t.Fatal(err)
 		}
@@ -75,24 +76,24 @@ func value(t *testing.T, s *Source, label, file string) string {
 
 func TestLabels(t *testing.T) {
 	r := newRepo(t)
-	c1 := r.commit("one", map[string]string{"orders.env": "A=1\n", "application.env": "S=1\n", "notes.txt": "x"})
+	c1 := r.commit("one", map[string]string{"orders/.env": "A=1\n", ".env": "S=1\n", "notes.txt": "x"})
 	r.git("tag", "v1")
 	r.git("branch", "feature/x")
 	r.git("checkout", "-q", "feature/x")
-	c2 := r.commit("two", map[string]string{"orders.env": "A=feature\n"})
+	c2 := r.commit("two", map[string]string{"orders/.env": "A=feature\n"})
 	r.git("checkout", "-q", "main")
-	c3 := r.commit("three", map[string]string{"orders.env": "A=3\n"})
+	c3 := r.commit("three", map[string]string{"orders/.env": "A=3\n"})
 	s := open(t, r)
 
 	tree, err := read(t, s, "")
-	if err != nil || tree.Label != "main" || tree.Version != c3 || string(tree.Files["orders.env"]) != "A=3\n" {
+	if err != nil || tree.Label != "main" || tree.Version != c3 || string(tree.Files["orders/.env"]) != "A=3\n" {
 		t.Errorf("default: %+v %v", tree, err)
 	}
-	if _, ok := tree.Files["notes.txt"]; ok || string(tree.Files["application.env"]) != "S=1\n" {
+	if _, ok := tree.Files["notes.txt"]; ok || string(tree.Files[".env"]) != "S=1\n" {
 		t.Errorf("only the asked files, and those that exist: %v", tree.Files)
 	}
 	for label, want := range map[string]string{"main": "A=3\n", "v1": "A=1\n", "feature/x": "A=feature\n", c1: "A=1\n", c2[:10]: "A=feature\n"} {
-		if got := value(t, s, label, "orders.env"); got != want {
+		if got := value(t, s, label, "orders/.env"); got != want {
 			t.Errorf("label %q: %q, want %q", label, got, want)
 		}
 	}
@@ -106,12 +107,12 @@ func TestLabels(t *testing.T) {
 
 func TestHostileLabels(t *testing.T) {
 	r := newRepo(t)
-	r.commit("one", map[string]string{"orders.env": "A=1\n"})
+	r.commit("one", map[string]string{"orders/.env": "A=1\n"})
 	s := open(t, r)
 	marker := filepath.Join(t.TempDir(), "pwned")
 	for _, label := range []string{
 		"--upload-pack=touch " + marker, "--output=" + marker, "-h", "../x", "main/../main",
-		"main^{tree}", "main:orders.env", "HEAD~0 --", "main\n--help", "@{-1}", "a b", "main..main", "--",
+		"main^{tree}", "main:orders/.env", "HEAD~0 --", "main\n--help", "@{-1}", "a b", "main..main", "--",
 	} {
 		if _, err := read(t, s, label); err != config.ErrNotFound {
 			t.Errorf("label %q: %v", label, err)
@@ -124,26 +125,26 @@ func TestHostileLabels(t *testing.T) {
 
 func TestRefreshPicksUpCommits(t *testing.T) {
 	r := newRepo(t)
-	r.commit("one", map[string]string{"orders.env": "A=1\n"})
+	r.commit("one", map[string]string{"orders/.env": "A=1\n"})
 	s := open(t, r)
-	r.commit("two", map[string]string{"orders.env": "A=2\n"})
-	if got := value(t, s, "", "orders.env"); got != "A=1\n" {
+	r.commit("two", map[string]string{"orders/.env": "A=2\n"})
+	if got := value(t, s, "", "orders/.env"); got != "A=1\n" {
 		t.Fatalf("before a refresh: %q", got)
 	}
 	if err := s.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := value(t, s, "", "orders.env"); got != "A=2\n" {
+	if got := value(t, s, "", "orders/.env"); got != "A=2\n" {
 		t.Errorf("after Refresh: %q", got)
 	}
 	r.git("tag", "v2")
 	s.Refresh(context.Background())
-	if got := value(t, s, "v2", "orders.env"); got != "A=2\n" {
+	if got := value(t, s, "v2", "orders/.env"); got != "A=2\n" {
 		t.Errorf("a new tag: %q", got)
 	}
 	r.git("branch", "gone")
 	s.Refresh(context.Background())
-	if value(t, s, "gone", "orders.env") != "A=2\n" {
+	if value(t, s, "gone", "orders/.env") != "A=2\n" {
 		t.Error("a new branch")
 	}
 	r.git("branch", "-D", "gone")
@@ -155,14 +156,14 @@ func TestRefreshPicksUpCommits(t *testing.T) {
 
 func TestPollPicksUpCommits(t *testing.T) {
 	r := newRepo(t)
-	r.commit("one", map[string]string{"orders.env": "A=1\n"})
+	r.commit("one", map[string]string{"orders/.env": "A=1\n"})
 	s := open(t, r)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { s.Poll(ctx, 20*time.Millisecond); close(done) }()
-	r.commit("two", map[string]string{"orders.env": "A=2\n"})
+	r.commit("two", map[string]string{"orders/.env": "A=2\n"})
 	deadline := time.Now().Add(5 * time.Second)
-	for value(t, s, "", "orders.env") != "A=2\n" {
+	for value(t, s, "", "orders/.env") != "A=2\n" {
 		if time.Now().After(deadline) {
 			t.Fatal("the poll never fetched")
 		}
@@ -174,14 +175,14 @@ func TestPollPicksUpCommits(t *testing.T) {
 
 func TestReopenReusesTheMirror(t *testing.T) {
 	r := newRepo(t)
-	r.commit("one", map[string]string{"orders.env": "A=1\n"})
+	r.commit("one", map[string]string{"orders/.env": "A=1\n"})
 	mirror := filepath.Join(t.TempDir(), "mirror")
 	if _, err := Open(context.Background(), Options{URL: r.dir, Dir: mirror}); err != nil {
 		t.Fatal(err)
 	}
-	r.commit("two", map[string]string{"orders.env": "A=2\n"})
+	r.commit("two", map[string]string{"orders/.env": "A=2\n"})
 	s, err := Open(context.Background(), Options{URL: r.dir, Dir: mirror})
-	if err != nil || value(t, s, "", "orders.env") != "A=2\n" {
+	if err != nil || value(t, s, "", "orders/.env") != "A=2\n" {
 		t.Errorf("reopen: %v", err)
 	}
 }
@@ -198,5 +199,34 @@ func TestOpenErrors(t *testing.T) {
 	}
 	if _, err := Open(context.Background(), Options{URL: "--upload-pack=x", Dir: filepath.Join(t.TempDir(), "m")}); err == nil {
 		t.Error("a URL that is an option")
+	}
+}
+
+func TestFoldersAndSymlinks(t *testing.T) {
+	r := newRepo(t)
+	r.commit("one", map[string]string{".env": "R=1\n", "order-service/.env.production": "A=1\n", "other/.env": "O=1\n", ".git-like/.env": "X=1\n"})
+	if err := os.Symlink("other", filepath.Join(r.dir, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../other/.env", filepath.Join(r.dir, "order-service", ".env")); err != nil {
+		t.Fatal(err)
+	}
+	r.git("add", "-A")
+	r.git("commit", "-q", "-m", "links")
+	s := open(t, r)
+	tree, err := s.Read(context.Background(), "", config.Files("order-service", "production"))
+	if err != nil || string(tree.Files[".env"]) != "R=1\n" || string(tree.Files["order-service/.env.production"]) != "A=1\n" {
+		t.Errorf("%v %v", tree.Files, err)
+	}
+	if _, ok := tree.Files["order-service/.env"]; ok {
+		t.Error("read a symlink")
+	}
+	if tree, _ := s.Read(context.Background(), "", config.Files("linked", "")); len(tree.Files) != 1 {
+		t.Errorf("read through a symlinked folder: %v", tree.Files)
+	}
+	for _, name := range []string{".git/config", "../.env", "a/b/.env", "other/secret"} {
+		if _, err := s.Read(context.Background(), "", []string{name}); err == nil {
+			t.Errorf("read %q", name)
+		}
 	}
 }

@@ -135,6 +135,9 @@ func parseRequest(segs []string) (request, bool) {
 		segs[last] = strings.TrimSuffix(segs[last], ".env")
 	}
 	r.app, r.profile = segs[0], segs[1]
+	if r.profile == NoProfile {
+		r.profile = ""
+	}
 	if len(segs) == 3 {
 		r.label = segs[2]
 		if !ValidLabel(r.label) {

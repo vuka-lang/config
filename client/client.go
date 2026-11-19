@@ -5,7 +5,7 @@
 //
 // When VUKA_CONFIG_URI is set, the package's initialisation, which runs
 // after web has read the env files, fetches the snapshot of the app
-// (VUKA_APP) in the profile VUKA_ENV (default "default") and sets its values
+// (VUKA_APP) in the profile VUKA_ENV (none if unset) and sets its values
 // in the process environment, so every web.Env call sees them. The real
 // environment keeps the last word; the server's values replace those from
 // env files; code defaults come last. Without VUKA_CONFIG_URI the package
@@ -83,9 +83,6 @@ func FromEnv() Config {
 		Cache:    os.Getenv("VUKA_CONFIG_CACHE"),
 		FailFast: os.Getenv("VUKA_CONFIG_FAIL_FAST") == "1",
 	}
-	if c.Profile == "" {
-		c.Profile = "default"
-	}
 	return c
 }
 
@@ -142,7 +139,7 @@ func fetch(c Config) (*config.Snapshot, []byte, error) {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return nil, nil, errors.New("VUKA_CONFIG_URI is not an http(s) URL")
 	}
-	u.Path = strings.TrimSuffix(u.Path, "/") + "/" + url.PathEscape(c.App) + "/" + url.PathEscape(c.Profile)
+	u.Path = strings.TrimSuffix(u.Path, "/") + "/" + url.PathEscape(c.App) + "/" + profileSegment(c.Profile)
 	if c.Label != "" {
 		u.Path += "/" + url.PathEscape(c.Label)
 	}
@@ -171,6 +168,13 @@ func fetch(c Config) (*config.Snapshot, []byte, error) {
 		}
 		time.Sleep(backoff[i])
 	}
+}
+
+func profileSegment(p string) string {
+	if p == "" {
+		return config.NoProfile
+	}
+	return url.PathEscape(p)
 }
 
 func check(c Config, s *config.Snapshot) error {
@@ -226,11 +230,11 @@ func cachePath(c Config) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	name := c.App + "-" + c.Profile
+	name := profileSegment(c.Profile)
 	if c.Label != "" {
-		name += "-" + url.PathEscape(c.Label)
+		name += "@" + url.PathEscape(c.Label)
 	}
-	return filepath.Join(dir, "vuka-config", name+".snapshot"), nil
+	return filepath.Join(dir, "vuka-config", url.PathEscape(c.App), name+".snapshot"), nil
 }
 
 func sealKey(token string) (cipher.AEAD, error) {

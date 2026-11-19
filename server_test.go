@@ -35,13 +35,19 @@ func newFixture(t *testing.T, cfg func(*config.ServerConfig)) *fixture {
 	t.Helper()
 	dir := t.TempDir()
 	for name, body := range map[string]string{
-		"application.env":            "MAIL_HOST=smtp.internal\nLOG=info\n",
-		"application-production.env": "LOG=warn\n",
-		"orders.env":                 "ORDERS_DB=orders-db\n",
-		"orders-production.env":      "RATE=100\nSECRET_ORDERS=$$\n",
-		"billing.env":                "BILLING_KEY=billing-only\n",
-		"billing-production.env":     "BILLING_PROD=1\n",
+		".env":                          "MAIL_HOST=smtp.internal\nLOG=info\n",
+		".env.production":               "LOG=warn\n",
+		"orders/.env":                   "ORDERS_DB=orders-db\n",
+		"orders/.env.production":        "RATE=100\nSECRET_ORDERS=$$\n",
+		".env.local":                    "ROOT_LOCAL=1\n",
+		".env.staging.local":            "X=1\n",
+		".git/.env":                     "GIT_DIR=1\n",
+		"order-service/.env":            "OS=1\n",
+		"order-service/.env.production": "OSP=1\n",
+		"billing/.env":                  "BILLING_KEY=billing-only\n",
+		"billing/.env.production":       "BILLING_PROD=1\n",
 	} {
+		os.MkdirAll(filepath.Dir(filepath.Join(dir, name)), 0o755)
 		os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644)
 	}
 	src, err := dirsrc.New(dir)
@@ -49,7 +55,7 @@ func newFixture(t *testing.T, cfg func(*config.ServerConfig)) *fixture {
 		t.Fatal(err)
 	}
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	f := &fixture{pub: pub, dir: dir, tokens: map[string]string{"orders": config.NewToken(), "billing": config.NewToken()}}
+	f := &fixture{pub: pub, dir: dir, tokens: map[string]string{"orders": config.NewToken(), "billing": config.NewToken(), "order-service": config.NewToken()}}
 	c := config.ServerConfig{Source: src, Key: priv, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Tokens: map[string]string{}}
 	for app, tok := range f.tokens {
 		c.Tokens[app] = config.HashToken(tok)
@@ -104,7 +110,7 @@ func TestServerJSON(t *testing.T) {
 	for _, s := range snap.Sources {
 		files = append(files, s.File)
 	}
-	if strings.Join(files, " ") != "application.env application-production.env orders.env orders-production.env" || snap.Sources[1].Values["LOG"] != "warn" || snap.Sources[0].Version == "" {
+	if strings.Join(files, " ") != ".env .env.production orders/.env orders/.env.production" || snap.Sources[1].Values["LOG"] != "warn" || snap.Sources[0].Version == "" {
 		t.Errorf("sources: %+v", snap.Sources)
 	}
 	var shape map[string]json.RawMessage
@@ -149,6 +155,9 @@ func TestServerEnv(t *testing.T) {
 func TestServerTokenScoping(t *testing.T) {
 	f := newFixture(t, nil)
 	_, _, body := f.get(t, "/orders/production", f.tokens["orders"])
+	if strings.Contains(string(body), "ROOT_LOCAL") || strings.Contains(string(body), "GIT_DIR") || strings.Contains(string(body), `"OS":`) {
+		t.Error("orders' snapshot holds a file outside its four paths")
+	}
 	if strings.Contains(string(body), "billing") || strings.Contains(string(body), "BILLING") {
 		t.Error("orders' snapshot holds billing's values")
 	}
@@ -310,7 +319,8 @@ func TestServerGitHookAndLabels(t *testing.T) {
 		}
 	}
 	commit := func(body string) {
-		os.WriteFile(filepath.Join(repo, "orders.env"), []byte(body), 0o644)
+		os.MkdirAll(filepath.Join(repo, "orders"), 0o755)
+		os.WriteFile(filepath.Join(repo, "orders/.env"), []byte(body), 0o644)
 		git("add", "-A")
 		git("commit", "-q", "-m", "c")
 	}
@@ -358,16 +368,39 @@ func TestServerGitHookAndLabels(t *testing.T) {
 
 func TestParseTokens(t *testing.T) {
 	h := config.HashToken("x")
-	got, err := config.ParseTokens("# tokens\norders=" + h + " # inline\n\nbilling=" + h + ", web=" + h + "\n")
-	if err != nil || len(got) != 3 || got["web"] != h {
+	got, err := config.ParseTokens("# tokens\norders=" + h + " # inline\n\nbilling=" + h + ", order-service=" + h + "\n")
+	if err != nil || len(got) != 3 || got["order-service"] != h {
 		t.Errorf("%v %v", got, err)
 	}
-	for _, bad := range []string{"orders", "orders=zz", "orders=" + h[:10], "bad-app=" + h, "application=" + h} {
+	for _, bad := range []string{"orders", "orders=zz", "orders=" + h[:10], "bad/app=" + h, "-x=" + h, ".git=" + h, "_hooks=" + h, "a b=" + h} {
 		if _, err := config.ParseTokens(bad); err == nil {
 			t.Errorf("%q parsed", bad)
 		}
 	}
 	if _, err := config.Server(config.ServerConfig{}); err == nil {
 		t.Error("Server without a source")
+	}
+}
+
+func TestServerHyphenatedAppsAndNoProfile(t *testing.T) {
+	f := newFixture(t, nil)
+	_, _, body := f.get(t, "/order-service/production", f.tokens["order-service"])
+	snap, err := config.Verify(body, f.pub)
+	if err != nil || snap.Values["OS"] != "1" || snap.Values["OSP"] != "1" || snap.Values["MAIL_HOST"] != "smtp.internal" || snap.Values["ORDERS_DB"] != "" {
+		t.Errorf("%+v %v", snap, err)
+	}
+	// No profile: only the two .env files apply.
+	_, _, body = f.get(t, "/orders/"+config.NoProfile, f.tokens["orders"])
+	snap, err = config.Verify(body, f.pub)
+	if err != nil || snap.Profile != "" || len(snap.Sources) != 2 || snap.Values["MAIL_HOST"] != "smtp.internal" || snap.Values["RATE"] != "" || snap.Values["LOG"] != "info" {
+		t.Errorf("%+v %v", snap, err)
+	}
+	if code, _, _ := f.get(t, "/order/production", f.tokens["order-service"]); code != 404 {
+		t.Errorf("a prefix of an app's name: %d", code)
+	}
+	for _, path := range []string{"/.git/production", "/../production", "/-x/production", "/a%2Fb/production", "/%2e%2e/x", "/_hooks/production"} {
+		if code, _, _ := f.get(t, path, f.tokens["orders"]); code != 404 {
+			t.Errorf("%s: %d", path, code)
+		}
 	}
 }

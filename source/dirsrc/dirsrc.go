@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/vuka-lang/config/v2"
 )
@@ -36,10 +35,17 @@ func (s *Source) Read(_ context.Context, label string, names []string) (config.T
 	}
 	t := config.Tree{Files: map[string][]byte{}}
 	for _, name := range names {
-		if name != filepath.Base(name) || !strings.HasSuffix(name, ".env") {
+		if !config.ValidFile(name) {
 			return t, fmt.Errorf("config: bad file name %q", name)
 		}
-		path := filepath.Join(s.dir, name)
+		path := filepath.Join(s.dir, filepath.FromSlash(name))
+		if dir := filepath.Dir(path); dir != s.dir {
+			if st, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) || err == nil && !st.IsDir() {
+				continue
+			} else if err != nil {
+				return t, err
+			}
+		}
 		st, err := os.Lstat(path)
 		if errors.Is(err, os.ErrNotExist) || err == nil && !st.Mode().IsRegular() {
 			continue

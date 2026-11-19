@@ -44,7 +44,7 @@ type Tree struct {
 type Source interface {
 	// Read returns the named files, those that exist, at label; an empty
 	// label is the source's default. An unknown label is ErrNotFound. Names
-	// are plain file names, never paths.
+	// are those ValidFile accepts, slash-separated, relative to the root.
 	Read(ctx context.Context, label string, names []string) (Tree, error)
 }
 

@@ -33,7 +33,7 @@ func TestCanonicalForm(t *testing.T) {
 
 func testSnapshot(t *testing.T, priv ed25519.PrivateKey) *Snapshot {
 	t.Helper()
-	s, err := Build("orders", "production", Tree{Label: "main", Version: "abc", Files: files("orders.env", "X=1\nY=<&>\n")})
+	s, err := Build("orders", "production", Tree{Label: "main", Version: "abc", Files: files("orders/.env", "X=1\nY=<&>\n")})
 	if err != nil {
 		t.Fatal(err)
 	}
