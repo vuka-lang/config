@@ -2,7 +2,7 @@ module github.com/vuka-lang/config/v2
 
 go 1.27
 
-require github.com/vuka-lang/web/v2 v2.22.1-0.20261119023333-2ad9527e7828
+require github.com/vuka-lang/web/v2 v2.22.1-0.20261119030346-e987ee1b8c7b
 
 require (
 	github.com/a-h/templ v0.3.1020 // indirect
