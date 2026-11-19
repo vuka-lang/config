@@ -8,8 +8,64 @@ and changes that reach running apps.
 An app uses it with no code beyond one import: set `VUKA_CONFIG_URI`, and the
 values arrive before `main` runs, read with `web.Env` as before.
 
-Status: design. The proposal is [docs/rfc/config-server.md](docs/rfc/config-server.md);
-nothing is released yet.
+Status: phase 1 of the [proposal](docs/rfc/config-server.md) is built: the git
+and directory sources, the layout and precedence of §4.3, the JSON and `.env`
+endpoints, app tokens, signed snapshots, the client's fetch at start-up, the
+sealed cached snapshot and `VUKA_CONFIG_FAIL_FAST`. Not yet: `/watch` and
+changes while an app runs, secrets, the check and pull tools, and
+`vuka config serve` (the server is `vuka-config serve` for now).
+
+## Run it
+
+Make a signing key and a token for each app:
+
+```sh
+go run github.com/vuka-lang/config/v2/cmd/vuka-config keygen --out signing.key
+go run github.com/vuka-lang/config/v2/cmd/vuka-config token orders
+```
+
+`keygen` prints the public key (`VUKA_CONFIG_KEY`); `token` prints the app's
+token (`VUKA_CONFIG_TOKEN`) and the hashed entry for the server's tokens file,
+one `app=hash` per line. Serve a repository or a directory laid out as in
+§4.3 (`application.env`, `application-production.env`, `orders.env`,
+`orders-production.env`):
+
+```sh
+vuka-config serve --git https://example.com/acme/config.git --tokens tokens --key signing.key
+vuka-config serve --dir /etc/acme-config --tokens tokens --key signing.key
+```
+
+The server listens on `:8888` (`--addr`). Its other settings are
+`VUKA_CONFIG_HOOK_SECRET` (enables `POST /_hooks/git`, which fetches at
+once; the repository is also fetched every `--poll`, 30 s),
+`VUKA_CONFIG_GIT_TOKEN` or `--ssh-key` for a private repository, and
+`VUKA_CONFIG_TOKENS` and `VUKA_CONFIG_SIGNING_KEY` in place of the files.
+`GET /{app}/{profile}[/{label}]` returns the signed snapshot, with `.env`
+after the last segment the merged values as an env file. App and profile
+names are letters, digits and underscores (a profile may also hold `-` and
+`.`); an app name has no hyphen, so `orders-production.env` is never read
+for another app.
+
+An app imports the client for its effect, and sets the variables:
+
+```go
+import _ "github.com/vuka-lang/config/v2/client"
+```
+
+| Variable | |
+|---|---|
+| `VUKA_CONFIG_URI` | the server's URL; unset, the client does nothing |
+| `VUKA_CONFIG_TOKEN` | the app's token |
+| `VUKA_CONFIG_KEY` | the server's public key |
+| `VUKA_APP`, `VUKA_ENV` | the app and its profile (`default` without `VUKA_ENV`) |
+| `VUKA_CONFIG_LABEL` | a branch, tag or commit; default the repository's default branch |
+| `VUKA_CONFIG_CACHE` | the file for the sealed last snapshot; default the user cache directory |
+| `VUKA_CONFIG_FAIL_FAST` | `1`: exit unless a fresh snapshot was fetched |
+
+The real environment wins over the server, the server over env files, env
+files over the defaults in code. If the server can't be reached, the client
+uses the last snapshot it received, or starts without one and logs an error
+naming the server.
 
 ## License
 
