@@ -2,6 +2,7 @@ package config
 
 import (
 	"bufio"
+	"context"
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
@@ -17,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // ServerConfig configures Server.
@@ -33,6 +35,15 @@ type ServerConfig struct {
 	// AppKeys maps each app to the public key its values are encrypted to
 	// (see ParseAppKeys); GET /_keys/{app} serves them, signed.
 	AppKeys map[string]*SecretPublicKey
+	// WatchInterval is how often a watched snapshot is read again to see
+	// whether its version moved; zero is 3s. A Refresher's hook reads at once.
+	WatchInterval time.Duration
+	// WatchHeartbeat is the gap between the comments that keep an idle
+	// stream open through proxies; zero is 25s.
+	WatchHeartbeat time.Duration
+	// WatchPerApp and WatchTotal cap the streams one app's token, and the
+	// server, hold open; zero is 16 and 2000, negative no cap.
+	WatchPerApp, WatchTotal int
 	// DecryptKey, when set, makes the server decrypt the cipher values
 	// encrypted to it before serving them (signed after), for clients that
 	// can't. The server can then read those secrets. Values encrypted to an
@@ -43,11 +54,12 @@ type ServerConfig struct {
 
 // Server returns the config server as an http.Handler: it can be mounted in
 // a Vuka app or served on its own.
-func Server(c ServerConfig) (http.Handler, error) {
+func Server(c ServerConfig) (*Handler, error) {
 	if c.Source == nil || len(c.Key) != ed25519.PrivateKeySize {
 		return nil, errors.New("config: Server needs a Source and a signing Key")
 	}
-	s := &server{ServerConfig: c, tokens: map[string][]byte{}}
+	s := &Handler{ServerConfig: c, tokens: map[string][]byte{}}
+	s.watch = newWatchHub(s)
 	if s.Logger == nil {
 		s.Logger = slog.Default()
 	}
@@ -66,12 +78,16 @@ func Server(c ServerConfig) (http.Handler, error) {
 	return s, nil
 }
 
-type server struct {
+// Handler is the config server's http.Handler. Close ends the streams it has
+// open (see ServerConfig.WatchInterval), which http.Server.Shutdown waits
+// for otherwise: register it with RegisterOnShutdown.
+type Handler struct {
 	ServerConfig
 	tokens map[string][]byte
+	watch  *watchHub
 }
 
-func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	segs := strings.Split(strings.Trim(r.URL.EscapedPath(), "/"), "/")
 	if len(segs) == 2 && segs[0] == "_hooks" && segs[1] == "git" {
@@ -93,36 +109,21 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	if len(segs) == 3 && segs[2] == "watch" {
+		s.watchRequest(w, r, app, segs)
+		return
+	}
 	req, ok := parseRequest(segs)
 	if !ok || req.app != app {
 		http.NotFound(w, r)
 		return
 	}
-	tree, err := s.Source.Read(r.Context(), req.label, Files(req.app, req.profile))
-	if errors.Is(err, ErrNotFound) {
-		http.NotFound(w, r)
-		return
-	}
-	if err != nil {
-		s.Logger.Error("config: reading the source", "app", app, "err", err)
-		http.Error(w, "source unavailable", http.StatusBadGateway)
-		return
-	}
-	snap, err := Build(req.app, req.profile, tree)
-	if err == nil && s.DecryptKey != nil {
-		err = decryptSnapshot(snap, s.DecryptKey)
-	}
+	snap, err := s.snapshot(r.Context(), req, true)
 	if err == nil {
 		err = snap.Sign(s.Key)
 	}
-	if errors.Is(err, ErrSharedSecret) || errors.Is(err, errServerDecrypt) {
-		s.Logger.Error("config: refusing a snapshot", "app", app, "err", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
 	if err != nil {
-		s.Logger.Error("config: building a snapshot", "app", app, "err", err)
-		http.Error(w, "invalid configuration", http.StatusInternalServerError)
+		s.refuse(w, r, app, err)
 		return
 	}
 	w.Header().Set("X-Config-Version", snap.Version)
@@ -135,6 +136,46 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(snap)
+}
+
+type sourceError struct{ err error }
+
+func (e *sourceError) Error() string { return e.err.Error() }
+
+// snapshot reads the source and merges req's files; with decrypt, values
+// encrypted to the server's key are opened.
+func (s *Handler) snapshot(ctx context.Context, req request, decrypt bool) (*Snapshot, error) {
+	tree, err := s.Source.Read(ctx, req.label, Files(req.app, req.profile))
+	if errors.Is(err, ErrNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, &sourceError{err}
+	}
+	snap, err := Build(req.app, req.profile, tree)
+	if err == nil && decrypt && s.DecryptKey != nil {
+		err = decryptSnapshot(snap, s.DecryptKey)
+	}
+	return snap, err
+}
+
+// refuse answers a failed snapshot: the same status and words wherever it
+// was asked for.
+func (s *Handler) refuse(w http.ResponseWriter, r *http.Request, app string, err error) {
+	var se *sourceError
+	switch {
+	case errors.Is(err, ErrNotFound):
+		http.NotFound(w, r)
+	case errors.As(err, &se):
+		s.Logger.Error("config: reading the source", "app", app, "err", err)
+		http.Error(w, "source unavailable", http.StatusBadGateway)
+	case errors.Is(err, ErrSharedSecret) || errors.Is(err, errServerDecrypt):
+		s.Logger.Error("config: refusing a snapshot", "app", app, "err", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	default:
+		s.Logger.Error("config: building a snapshot", "app", app, "err", err)
+		http.Error(w, "invalid configuration", http.StatusInternalServerError)
+	}
 }
 
 var errServerDecrypt = errors.New("config: the server can't decrypt a value")
@@ -177,7 +218,7 @@ func decryptSnapshot(snap *Snapshot, key *SecretKey) error {
 // app's, /_keys for the server's decryption key. They are public, but
 // signed, so a client that holds the server's signing key can tell a key
 // that was substituted on the way. Anything else is a plain 404.
-func (s *server) keys(w http.ResponseWriter, r *http.Request, segs []string) {
+func (s *Handler) keys(w http.ResponseWriter, r *http.Request, segs []string) {
 	var pub *SecretPublicKey
 	var subject string
 	switch len(segs) {
@@ -233,7 +274,7 @@ func parseRequest(segs []string) (request, bool) {
 	return r, ValidApp(r.app) && ValidProfile(r.profile)
 }
 
-func (s *server) authenticate(r *http.Request) (string, bool) {
+func (s *Handler) authenticate(r *http.Request) (string, bool) {
 	const prefix = "Bearer "
 	h := r.Header.Get("Authorization")
 	if len(h) <= len(prefix) || !strings.EqualFold(h[:len(prefix)], prefix) {
@@ -249,7 +290,7 @@ func (s *server) authenticate(r *http.Request) (string, bool) {
 	return found, found != ""
 }
 
-func (s *server) hook(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) hook(w http.ResponseWriter, r *http.Request) {
 	ref, ok := s.Source.(Refresher)
 	if r.Method != http.MethodPost || s.HookSecret == "" || !ok {
 		http.NotFound(w, r)
@@ -265,10 +306,11 @@ func (s *server) hook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "refresh failed", http.StatusBadGateway)
 		return
 	}
+	s.watch.kick()
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *server) hookAuthorized(r *http.Request, body []byte) bool {
+func (s *Handler) hookAuthorized(r *http.Request, body []byte) bool {
 	want := sha256.Sum256([]byte(s.HookSecret))
 	for _, h := range []string{"X-Hook-Token", "X-Gitlab-Token"} {
 		if v := r.Header.Get(h); v != "" {

@@ -25,10 +25,11 @@ import (
 )
 
 type fixture struct {
-	srv    *httptest.Server
-	pub    ed25519.PublicKey
-	tokens map[string]string
-	dir    string
+	srv     *httptest.Server
+	handler *config.Handler
+	pub     ed25519.PublicKey
+	tokens  map[string]string
+	dir     string
 }
 
 func newFixture(t *testing.T, cfg func(*config.ServerConfig)) *fixture {
@@ -67,6 +68,7 @@ func newFixture(t *testing.T, cfg func(*config.ServerConfig)) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.handler = h
 	f.srv = httptest.NewServer(h)
 	t.Cleanup(f.srv.Close)
 	return f
@@ -201,7 +203,7 @@ func TestServerBadNames(t *testing.T) {
 	tok := f.tokens["orders"]
 	for _, path := range []string{
 		"/orders", "/orders/production/a/b", "/orders/..", "/orders/%2e%2e/x", "/orders/pro%2Fduction", "/orders/prod uction",
-		"/orders/production/--upload-pack=x", "/orders/production/..%2Fx", "/orders/production/watch", "/orders/-x", "/",
+		"/orders/production/--upload-pack=x", "/orders/production/..%2Fx", "/orders/-x", "/",
 	} {
 		if code, _, _ := f.get(t, path, tok); code != 404 {
 			t.Errorf("%s: %d", path, code)
