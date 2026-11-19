@@ -65,6 +65,7 @@ import _ "github.com/vuka-lang/config/v2/client"
 | `VUKA_CONFIG_CACHE` | the file for the sealed last snapshot; default the user cache directory |
 | `VUKA_CONFIG_FAIL_FAST` | `1`: exit unless a fresh snapshot was fetched |
 | `VUKA_CONFIG_WATCH` | `0`: fetch at start only, don't follow changes |
+| `VUKA_CONFIG_RESTART` | `1`: restart the app when a change reaches a key it reads only at start |
 
 The real environment wins over the server, the server over env files, env
 files over the defaults in code. If the server can't be reached, the client
@@ -107,9 +108,16 @@ watchers (a directory's files are hashed, a git label's commit read, every
 at 16 per token and 2000 in all, answering `429` or `503` with `Retry-After`.
 In Go, `config.Server` returns a `*config.Handler`; `http.Server.RegisterOnShutdown(h.Close)`
 ends the streams when the server shuts down (`vuka-config serve` does).
-Values that cannot change while an app runs (a listen address) will be
-reported as needing a restart once the compiler records them (RFC §7); until
-then every value is applied.
+Values that cannot change while an app runs (a listen address, a database URL
+read once to open a pool) are found by the compiler, which records the keys
+the program reads while it starts (RFC §7.3). A change to one is logged by key,
+`config: KEY1, KEY2 changed and take effect on restart`, and the applied line
+ends with `; restart needed for KEY1, KEY2`. With `VUKA_CONFIG_RESTART=1` the
+app also drains and exits with status 75 so its supervisor starts it with the
+new values; that needs a supervisor that restarts it, and instances restart
+one at a time only if the supervisor staggers them. Keys the compiler cannot
+read (not string constants), and calls in dependencies, are not classified:
+`vuka vet` counts the first (W0405).
 
 ## Secrets
 

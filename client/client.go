@@ -44,6 +44,15 @@
 //	VUKA_CONFIG_CACHE      the file holding the last snapshot received
 //	VUKA_CONFIG_FAIL_FAST  1: exit unless a fresh snapshot was fetched
 //	VUKA_CONFIG_WATCH      0: fetch at start only, don't follow changes
+//	VUKA_CONFIG_RESTART    1: restart the app when a change reaches a key it
+//	                       reads only at start (see below)
+//
+// A key the program reads only while it starts (the compiler records them
+// with web.RestartOnlyEnv) can't take a change while it runs: the client
+// logs, by key, that the change takes effect on restart. With
+// VUKA_CONFIG_RESTART=1 it also calls web.Restart: the app drains and exits
+// with status web.RestartStatus (75), for a supervisor that restarts the
+// program to start it with the new values.
 package client
 
 import (
@@ -108,6 +117,10 @@ type Config struct {
 	// Reconnect is the first wait before the stream is opened again, doubling
 	// to thirty times that; zero is 1s.
 	Reconnect time.Duration
+	// Restart makes the client restart the app when a change reaches a key the
+	// compiler found read only while the app starts (web.NeedsRestart): it
+	// calls web.Restart, which drains the app and exits with web.RestartStatus.
+	Restart bool
 }
 
 // FromEnv reads Config from the VUKA_ environment variables.
@@ -123,6 +136,7 @@ func FromEnv() Config {
 		Cache:      os.Getenv("VUKA_CONFIG_CACHE"),
 		FailFast:   os.Getenv("VUKA_CONFIG_FAIL_FAST") == "1",
 		NoWatch:    os.Getenv("VUKA_CONFIG_WATCH") == "0",
+		Restart:    os.Getenv("VUKA_CONFIG_RESTART") == "1",
 	}
 	return c
 }
@@ -143,6 +157,8 @@ type Client struct {
 	have    bool
 	failed  string
 	logged  string
+
+	restarting bool
 }
 
 // Start fetches the snapshot and applies it, falling back to the cached one
@@ -281,16 +297,44 @@ func (cl *Client) refresh(hint string) {
 	if err := writeCache(c, raw); err != nil {
 		log.Printf("config: not caching the snapshot: %v", err)
 	}
-	if n := len(changes); n > 0 {
-		keys := make([]string, n)
-		for i, ch := range changes {
-			keys[i] = ch.Key
+	cl.logApplied(changes, snap.Version)
+}
+
+// logApplied logs the keys a version changed, by key only, and which of
+// them need a restart; with Config.Restart it then restarts the app.
+func (cl *Client) logApplied(changes []web.EnvChange, version string) {
+	n := len(changes)
+	if n == 0 {
+		return
+	}
+	var keys, later []string
+	for _, ch := range changes {
+		keys = append(keys, ch.Key)
+		if web.NeedsRestart(ch.Key) {
+			later = append(later, ch.Key)
 		}
-		noun := "changes"
-		if n == 1 {
-			noun = "change"
-		}
-		log.Printf("config: applied %d %s (version %.12s): %s", n, noun, snap.Version, strings.Join(keys, ", "))
+	}
+	noun := "changes"
+	if n == 1 {
+		noun = "change"
+	}
+	line := fmt.Sprintf("config: applied %d %s (version %.12s): %s", n, noun, version, strings.Join(keys, ", "))
+	if len(later) > 0 {
+		line += "; restart needed for " + strings.Join(later, ", ")
+	}
+	log.Print(line)
+	if len(later) == 0 {
+		return
+	}
+	log.Printf("config: %s changed and take effect on restart", strings.Join(later, ", "))
+	if !cl.c.Restart || cl.restarting {
+		return
+	}
+	log.Printf("config: restarting to apply %s", strings.Join(later, ", "))
+	if web.Restart() {
+		cl.restarting = true
+	} else {
+		log.Print("config: no app is running to restart; restart the program to apply them")
 	}
 }
 
