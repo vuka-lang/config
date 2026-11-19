@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: stable
+
+jobs:
+  test:
+    name: gofmt, vet, race tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      # The git source's tests make commits in temporary repositories.
+      - name: Git identity
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@example.invalid"
+      # A change made together with web's has a branch of the same name there.
+      - name: The web branch of this change, if any
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          if [ "$BRANCH" != main ] && git ls-remote --exit-code --heads https://github.com/vuka-lang/web "$BRANCH" >/dev/null; then
+            git clone --quiet --depth=1 --branch "$BRANCH" https://github.com/vuka-lang/web "$RUNNER_TEMP/web"
+            go mod edit -replace github.com/vuka-lang/web/v2="$RUNNER_TEMP/web"
+          fi
+      - name: gofmt
+        run: |
+          bad=$(gofmt -l .)
+          if [ -n "$bad" ]; then echo "not gofmt'd:"; echo "$bad"; exit 1; fi
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
