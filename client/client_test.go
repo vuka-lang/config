@@ -108,7 +108,7 @@ func newRun(t *testing.T, s *server) *run {
 	r := &run{dir: dir, cache: filepath.Join(dir, "cache", "orders.snapshot"), env: map[string]string{
 		"VUKA_CONFIG_URI": s.URL, "VUKA_CONFIG_TOKEN": token, "VUKA_CONFIG_KEY": s.pub,
 		"VUKA_APP": "orders", "VUKA_ENV": "production", "VUKA_CONFIG_CACHE": filepath.Join(dir, "cache", "orders.snapshot"),
-		"REAL": "real", "CLIENT_PROBE": "A,B,C,D,SHARED,REAL,VUKA_ENV,VUKA_DEV,NONE",
+		"REAL": "real", "VUKA_CONFIG_WATCH": "0", "CLIENT_PROBE": "A,B,C,D,SHARED,REAL,VUKA_ENV,VUKA_DEV,NONE",
 	}}
 	return r
 }

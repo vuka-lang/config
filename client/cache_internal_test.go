@@ -40,12 +40,12 @@ func TestCacheKeepsCiphertextAndDecryptsOnLoad(t *testing.T) {
 	if cached.Values["DB_PASSWORD"] != ct {
 		t.Errorf("the cache holds %q, want the ciphertext", cached.Values["DB_PASSWORD"])
 	}
-	values, err := resolve(c, cached)
+	values, err := (&Client{c: c}).resolve(cached)
 	if err != nil || values["DB_PASSWORD"] != "plain-pw-1234" {
 		t.Errorf("%v %v", values, err)
 	}
 	c.SecretKeys = ""
-	if _, err := resolve(c, cached); err == nil || !strings.Contains(err.Error(), "DB_PASSWORD") || strings.Contains(err.Error(), ct) {
+	if _, err := (&Client{c: c}).resolve(cached); err == nil || !strings.Contains(err.Error(), "DB_PASSWORD") || strings.Contains(err.Error(), ct) {
 		t.Errorf("%v", err)
 	}
 }
