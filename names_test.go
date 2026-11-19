@@ -12,7 +12,7 @@ func TestNames(t *testing.T) {
 			t.Errorf("app %q rejected", app)
 		}
 	}
-	for _, app := range []string{"", "-x", ".git", "..", ".", ".hidden", "a/b", "a\\b", "a.b", "_hooks", "a b", "a\x00", "orders/..", strings.Repeat("a", 65)} {
+	for _, app := range []string{"", "-x", ".git", "..", ".", ".hidden", "a/b", "a\\b", "a.b", "_hooks", "_keys", "a b", "a\x00", "orders/..", strings.Repeat("a", 65)} {
 		if ValidApp(app) {
 			t.Errorf("app %q accepted", app)
 		}

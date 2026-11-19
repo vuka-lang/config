@@ -6,6 +6,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
+	"sort"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -79,7 +82,14 @@ func Build(app, profile string, t Tree) (*Snapshot, error) {
 			layer.Version = hex.EncodeToString(sum[:])
 		}
 		fmt.Fprintf(h, "%s\x00%x\x00", name, sum)
+		shared := !strings.Contains(name, "/")
 		for _, p := range pairs {
+			switch {
+			case shared && IsCipher(p.Value):
+				return nil, fmt.Errorf("%w: %s: %s (every app reads this file, and each app has its own key)", ErrSharedSecret, name, p.Key)
+			case !IsCipher(p.Value) && strings.Contains(p.Value, CipherPrefix+cipherVersion+":"):
+				return nil, fmt.Errorf("config: %s: %s: a cipher value can't be part of another value", name, p.Key)
+			}
 			layer.Values[p.Key] = p.Value
 		}
 		for k, v := range layer.Values {
@@ -92,3 +102,20 @@ func Build(app, profile string, t Tree) (*Snapshot, error) {
 	}
 	return s, nil
 }
+
+// String describes the snapshot with every value masked, so printing one
+// never shows a secret.
+func (s *Snapshot) String() string {
+	keys := make([]string, 0, len(s.Values))
+	for k := range s.Values {
+		keys = append(keys, k+"=***")
+	}
+	sort.Strings(keys)
+	return fmt.Sprintf("snapshot %s/%s@%.12s [%s]", s.App, s.Profile, s.Version, strings.Join(keys, " "))
+}
+
+// LogValue implements slog.LogValuer with the masked description.
+func (s *Snapshot) LogValue() slog.Value { return slog.StringValue(s.String()) }
+
+// GoString makes %#v mask values too.
+func (s *Snapshot) GoString() string { return s.String() }

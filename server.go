@@ -30,6 +30,14 @@ type ServerConfig struct {
 	// Refresher. It is compared with the X-Hook-Token or X-Gitlab-Token
 	// header, or checked as the HMAC of the body in X-Hub-Signature-256.
 	HookSecret string
+	// AppKeys maps each app to the public key its values are encrypted to
+	// (see ParseAppKeys); GET /_keys/{app} serves them, signed.
+	AppKeys map[string]*SecretPublicKey
+	// DecryptKey, when set, makes the server decrypt the cipher values
+	// encrypted to it before serving them (signed after), for clients that
+	// can't. The server can then read those secrets. Values encrypted to an
+	// app key pass through.
+	DecryptKey *SecretKey
 	Logger     *slog.Logger
 }
 
@@ -50,6 +58,11 @@ func Server(c ServerConfig) (http.Handler, error) {
 		}
 		s.tokens[app] = b
 	}
+	for app, k := range c.AppKeys {
+		if k == nil || !ValidApp(app) {
+			return nil, fmt.Errorf("config: key of %q: want a valid app name and a public key", app)
+		}
+	}
 	return s, nil
 }
 
@@ -68,6 +81,10 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if segs[0] == "_keys" {
+		s.keys(w, r, segs)
 		return
 	}
 	app, ok := s.authenticate(r)
@@ -92,8 +109,16 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	snap, err := Build(req.app, req.profile, tree)
+	if err == nil && s.DecryptKey != nil {
+		err = decryptSnapshot(snap, s.DecryptKey)
+	}
 	if err == nil {
 		err = snap.Sign(s.Key)
+	}
+	if errors.Is(err, ErrSharedSecret) || errors.Is(err, errServerDecrypt) {
+		s.Logger.Error("config: refusing a snapshot", "app", app, "err", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 	if err != nil {
 		s.Logger.Error("config: building a snapshot", "app", app, "err", err)
@@ -110,6 +135,67 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(snap)
+}
+
+var errServerDecrypt = errors.New("config: the server can't decrypt a value")
+
+func decryptSnapshot(snap *Snapshot, key *SecretKey) error {
+	open := func(file, name, v string) (string, error) {
+		if !IsCipher(v) {
+			return v, nil
+		}
+		if id, err := CipherKeyID(v); err == nil && id != key.id {
+			return v, nil
+		}
+		pt, err := Decrypt([]*SecretKey{key}, snap.App, name, v)
+		if err != nil {
+			return "", fmt.Errorf("%w: %s: %s: %v", errServerDecrypt, file, name, err)
+		}
+		return pt, nil
+	}
+	for i := range snap.Sources {
+		l := &snap.Sources[i]
+		for k, v := range l.Values {
+			pt, err := open(l.File, k, v)
+			if err != nil {
+				return err
+			}
+			l.Values[k] = pt
+		}
+	}
+	for k, v := range snap.Values {
+		pt, err := open("merged values", k, v)
+		if err != nil {
+			return err
+		}
+		snap.Values[k] = pt
+	}
+	return nil
+}
+
+// keys serves the public keys values are encrypted to: /_keys/{app} for an
+// app's, /_keys for the server's decryption key. They are public, but
+// signed, so a client that holds the server's signing key can tell a key
+// that was substituted on the way. Anything else is a plain 404.
+func (s *server) keys(w http.ResponseWriter, r *http.Request, segs []string) {
+	var pub *SecretPublicKey
+	var subject string
+	switch len(segs) {
+	case 1:
+		if s.DecryptKey != nil {
+			pub, subject = s.DecryptKey.Public(), ServerSubject
+		}
+	case 2:
+		if app, err := url.PathUnescape(segs[1]); err == nil && ValidApp(app) {
+			pub, subject = s.AppKeys[app], AppSubject(app)
+		}
+	}
+	if pub == nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(signKey(s.Key, subject, pub))
 }
 
 type request struct {

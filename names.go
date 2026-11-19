@@ -17,8 +17,10 @@ const NoProfile = "-"
 
 // ValidApp reports whether s can name an app: one directory name of
 // letters, digits, hyphens and underscores, not starting with a hyphen or
-// a dot. "_hooks" is the server's own path.
-func ValidApp(s string) bool { return len(s) <= 64 && appName.MatchString(s) && s != "_hooks" }
+// a dot. "_hooks" and "_keys" are the server's own paths.
+func ValidApp(s string) bool {
+	return len(s) <= 64 && appName.MatchString(s) && s != "_hooks" && s != "_keys"
+}
 
 // ValidProfile reports whether s can name a profile; the empty profile is
 // the absence of one and is valid too.
