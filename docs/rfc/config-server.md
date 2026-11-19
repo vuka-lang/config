@@ -135,8 +135,14 @@ and as `config.Server(...)`, a handler any Vuka app can mount.
 | `GET /{app}/{profile}[/{label}]` | the snapshot as JSON: each source (file and version) with its values, the merged values, the version |
 | `GET /{app}/{profile}[/{label}].env` | the merged values as an env file, for scripts and for apps not built with Vuka |
 | `GET /{app}/{profile}/watch` | a stream of the snapshot's new versions (§7) |
+| `GET /_keys/{app}` | the public key `{cipher}` values for the app are encrypted to (§8), signed with the server's signing key; public, no token |
+| `GET /_keys` | the same for the server's decryption key, when `--decrypt` is on |
 
 With no profile, the profile segment is `-`, which no profile can be.
+`_hooks` and `_keys` are the server's own paths and are not app names. An
+app with no key, an unknown app and a reserved name get the same 404 from
+`/_keys/{app}`; `vuka config encrypt --server` checks the signature against
+`VUKA_CONFIG_KEY`, so a key substituted on the way is refused.
 
 ### 5.2 Access
 
@@ -227,17 +233,67 @@ stream costs at most that.
 
 ## 8. Secrets
 
-- A value written as `{cipher}…` is encrypted.
-  `vuka config encrypt --app orders <value>` prints one; it runs on an
-  operator's machine, not as an endpoint.
+- A value written as `{cipher}…` is encrypted. `vuka config encrypt --app
+  orders --var DB_PASSWORD` reads the value from standard input (never
+  from an argument, which would land in the shell's history) and prints one;
+  it runs on an operator's machine, not as an endpoint.
 - **Decrypted by the client, by default.** Each app has its own key pair;
   a value is encrypted to the app's public key and the server passes the
-  ciphertext through. Neither the repository nor the server can read it,
-  so a leak of either leaks no secret.
-- Decrypting on the server instead, with one server key, is an option
-  (`--decrypt`) for clients that aren't Vuka apps and read the `.env` form.
+  ciphertext through, covered by the snapshot's signature like every other
+  value. Neither the repository nor the server can read it, so a leak of
+  either leaks no secret.
+- **The app's private key** reaches the app as `VUKA_CONFIG_SECRET_KEY`
+  (base64). It is the one secret a deploy must still deliver, by whatever
+  delivers the app's other secrets; the client removes it from the process
+  environment once read. `vuka config keygen-app orders` makes the pair and
+  prints the line for the server's app-keys file (`orders=<public key>`, one
+  per line, `--app-keys` or `VUKA_CONFIG_APP_KEYS`).
+- **Construction.** HPKE (RFC 9180, base mode) with DHKEM(X25519,
+  HKDF-SHA256), HKDF-SHA256 and AES-256-GCM, from the standard library's
+  `crypto/hpke`: a fresh ephemeral key per value, so equal values encrypt
+  differently and anyone with the public key can encrypt but not read.
+- **Wire format.** `{cipher}v1:<key-id>:<base64url>`: the key-id is the
+  first 6 bytes of the SHA-256 of the app's public key, base64url (8
+  characters); the body is the HPKE encapsulated key (32 bytes) followed by
+  the ciphertext and tag, base64url without padding.
+- **Binding.** The HPKE `info` is `vuka-config cipher v1` and the
+  associated data is `vuka-config cipher v1`, NUL, the app name, NUL, the
+  variable name. A ciphertext copied to another app's folder, or under
+  another variable, fails to decrypt.
+- **Rotation.** `VUKA_CONFIG_SECRET_KEY` may list several private keys,
+  comma-separated; the client picks by key-id. Rotate by publishing the new
+  public key in the app-keys file, giving the app both private keys,
+  re-encrypting the values, and then dropping the old private key.
+- **Fail closed.** After the signature is checked and before values are
+  applied, the client decrypts every `{cipher}` value it would apply. One it
+  can't (no key, a key-id it has no key for, tampered, bound to another app
+  or variable) is never applied as text: the start fails with an error
+  naming the variable, never the value, and it does so whatever
+  `VUKA_CONFIG_FAIL_FAST` says. That setting is about a server that can't be
+  reached, where starting with defaults is a considered degradation; here the
+  server answered, the secret is part of the app's configuration, and an app
+  running without it is worse than one that isn't running. A key the real
+  environment already sets is not applied from the server and so not
+  decrypted. The sealed cache (§6.3) keeps the ciphertext, so secrets stay
+  encrypted at rest there too, and decrypts on load, with the same rule.
+- **No secrets in shared files.** A `{cipher}` value in the root `.env` or
+  `.env.<profile>`, which every app reads, is an error: with a key per app no
+  single ciphertext is readable by all of them. The server logs it and
+  answers 500 for every snapshot that file is part of, naming the file and
+  the variable and serving nothing; both sources enforce it. A cipher value
+  can't be interpolated into another value (`${PW}`) either.
+- **Decrypting on the server instead** is an option (`--decrypt`, with a
+  separate X25519 decryption key, `--decrypt-key` or
+  `VUKA_CONFIG_DECRYPT_KEY`; never the signing key), for clients that aren't
+  Vuka apps and read the `.env` form. `vuka config encrypt --server-key`
+  encrypts to it. A value whose key-id is the server's is decrypted before
+  the snapshot is signed and served; one made for an app key passes through
+  even then. It is off by default, and turning it on means the server can
+  read those secrets, and so can anyone who can read its memory or its key.
+  A value the server can't decrypt is a 500, never served as ciphertext.
 - Secret values are never logged, masked in every report, and left out of
-  `vuka config pull` (§9) unless asked for.
+  `vuka config pull` (§9) unless asked for. A snapshot that is printed shows
+  its keys, never their values.
 
 ## 9. Tools
 
@@ -257,7 +313,7 @@ stream costs at most that.
 - **`vuka config pull orders production`** writes `.env.local` from the
   server, so a developer can run with an environment's values. Secrets stay
   out unless `--secrets` is given and the token may read them.
-- **`vuka config encrypt`** as in §8.
+- **`vuka config encrypt`** and **`keygen-app`** as in §8.
 
 ## 10. Phases
 
@@ -290,3 +346,7 @@ and versions with the rest of the set.
 3. **Signing key custody.** Kept on the server's machine apart from its
    other secrets (proposed), or on an operator's machine, signing each
    snapshot version offline before it can be served?
+4. **Shared secrets: a key shared by a group of apps?** A secret every app in a group needs (a mail
+   password) must be written once per app, since per-app keys leave no
+   ciphertext readable by all (§8). A key shared by a group of apps, or a
+   server-decrypted value allowed in shared files, could avoid the copies.
