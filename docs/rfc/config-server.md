@@ -224,13 +224,10 @@ an env file gave it, or is unset.
     always current.
 - **Values that can't change while the app runs** (a listen address, a
   database URL read once to open a pool): the compiler sees each `web.Env`
-  call and where it runs, so it records the keys read only while the app
-  starts. A change to one of those is logged as needing a restart, and the
-  snapshot's report says so. An app can opt in to restarting itself: it
-  drains and exits so its supervisor starts it with the new values, one
-  instance at a time. *Pending: this needs the compiler, and is not part of
-  the first `/watch` release; until then every key is applied, and an app
-  that reads one only at start keeps its start-up value.*
+  call and where it runs, so it records the keys read while the app starts
+  (§7.3). A change to one of those is logged as needing a restart, by key,
+  and the app can opt in to restarting itself: it drains and exits so its
+  supervisor starts it with the new values.
 
 ### 7.1 The stream
 
@@ -298,14 +295,102 @@ before the caps are looked at.
   runs with a complete configuration, and a half-applied or lost one is
   worse than the one it has.
 - **Logging.** `config: applied 3 changes (version 3f2a1c9e0b1d): KEY1,
-  KEY2, KEY3`: keys only.
+  KEY2, KEY3`: keys only. When some of them are restart-only keys (§7.3) the
+  line ends with `; restart needed for KEY1, KEY2` and a line of its own
+  follows: `config: KEY1, KEY2 changed and take effect on restart`.
 - **A start with no snapshot** (no server, no cache) goes on trying in the
   background, with the same backoff, and applies the first snapshot it gets.
   A start from the cache applies a newer version when the server answers.
 - **Each applied snapshot replaces the sealed cache** (§6.3).
 - **Opt-out.** `VUKA_CONFIG_WATCH=0` fetches at start only.
+- **Restart-only keys.** After each apply the client asks `web.NeedsRestart`
+  about every key that changed (§7.3).
 - **Applying** is one call to `web.ApplyEnv` from one goroutine, so
   `OnEnvChange` callbacks run there, one after another.
+
+### 7.3 Restart-only keys
+
+A value the program reads once and keeps (a listen address, a database URL
+given to a pool, a field set in a constructor) isn't touched by a change:
+`web.Env` has already returned. `vuka build`, `run`, `test` and `vet` find
+those keys and write, into each main package, a generated file
+`vuka_restart_gen.go` (`vuka gen` writes it to disk for plain go tools):
+
+```go
+func init() {
+	vukaweb.RestartOnlyEnv(
+		"DATABASE_URL",
+		"LISTEN_ADDR",
+	)
+}
+```
+
+`web.NeedsRestart(key)` reports whether a key was recorded; the config
+client asks it for each key an apply changed. The file is written only when
+the web package the module builds with has `RestartOnlyEnv`: an app on an
+older web is built as before, and its changes are applied without a report.
+
+**The classification.** The analysis is syntactic, over the module's Go (its
+`.go` files and the Go the compiler writes for `.vuka` and `.vuka.html`
+files), and errs toward flagging a key: a false "needs restart" costs a log
+line, a missed one silently ignores a change.
+
+- A *read* is a call of `web.Env`, `web.MustEnv` or `web.Require` whose key is
+  a string constant: a literal, a constant of the package or of another
+  package of the module, or a concatenation of those. A read is *at start*
+  when its function is reached by calls from a root: the package variable
+  initialisers, `init`, `main` (in a main package), and the `Start` method of
+  any type (what `web` calls when the app starts).
+- A call is resolved by name: `f()`, `pkg.F()` for a package of the module,
+  and `x.M()` for every method of the module named `M`. A function value
+  runs only when it is a function literal called on the spot, a local
+  variable holding one that is called, or an argument of `Provide`, `Eager`,
+  `Service`, `Controller`, `OnStart` or `Check`, which build or start it
+  once. Any other function value (a handler given to `Get`, a cron's
+  function, a closure returned or stored) doesn't run at start, however it
+  is registered, so a live page's `Render`, its events, `Update`, and
+  `Mount` (which runs for each page, not once) are live.
+- `web.Require` checks when the app is built: its keys are always at start.
+- A key is **restart-only** when any read of it is at start, unless the
+  module also names it in `web.Hot` or `web.OnEnvChange`: the app handles its
+  changes, so it isn't flagged. A helper called both from `main` and from a
+  handler makes its key restart-only, since the read at start keeps its value.
+
+**Limits.**
+
+- A read whose key isn't a string constant (a variable, a parameter, the
+  result of a call) can't be classified and is skipped. `vuka vet` counts
+  them in a warning, W0405, naming the first. A helper such as
+  `func setting(name string) string { return web.Env[string](name) }` hides
+  every key passed through it.
+- Only the module being built is read. Calls in dependencies, other modules
+  of a workspace included, are not.
+- Only the web package's reads count; `os.Getenv` and `os.LookupEnv` are not
+  read.
+- The whole module is analysed for each main package: a key read at start
+  only by another main's packages is registered too.
+
+**What the client does.** A changed key for which `web.NeedsRestart` is true
+is logged by key only (§7.2). With `VUKA_CONFIG_RESTART=1` the client then
+calls `web.Restart`: the running app stops as on `SIGTERM` (`Run` stops
+accepting, drains its connections for up to ten seconds, stops its services)
+and the process exits with status 75 (`web.RestartStatus`, `EX_TEMPFAIL`) so
+a supervisor can tell it from a failure (1) and a stop (0). The client logs
+`config: restarting to apply KEY1, KEY2`; with no app running (`App.Run`
+isn't in use) it says so and does nothing else. It asks once per process.
+
+This needs a supervisor that starts the program again after it exits: systemd
+(`Restart=always`, or `on-failure`: 75 is a failure status), a container platform's
+restart policy, a Nomad or Kubernetes restart. Nothing here builds a
+restart: with `VUKA_CONFIG_RESTART` unset the program only logs. With
+several instances, they all see the new version at about the same time and
+each restarts as soon as it has drained; they restart one at a time only if
+the supervisor staggers them (a rolling update does, a restart policy does
+not). The server does no coordination, so an operator who wants a rolling
+restart uses the supervisor's.
+
+The restarted program fetches the new snapshot at start, so the keys it
+restarted for no longer change and it doesn't restart again.
 
 ## 8. Secrets
 
@@ -400,8 +485,9 @@ before the caps are looked at.
    and shared values.
 2. **Secrets.** `{cipher}` values decrypted by the client, per-app keys,
    `vuka config encrypt`, and the server-side option.
-3. **Changes while running.** `/watch`, `web.OnEnvChange`, `web.Hot`
-   (done); the compiler's start-only keys and the opt-in restart (pending).
+3. **Changes while running.** `/watch`, `web.OnEnvChange`, `web.Hot`, the
+   compiler's restart-only keys (§7.3) and the opt-in restart
+   (`VUKA_CONFIG_RESTART`) (done).
 4. **Checks and reports.** `vuka config check`, the toolbar panel and
    `/debug/env`, `vuka config pull`.
 
